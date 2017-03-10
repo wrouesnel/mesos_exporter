@@ -40,9 +40,14 @@ func getX509CertPool(pemFiles []string) *x509.CertPool {
 	return pool
 }
 
-func mkHttpClient(url string, timeout time.Duration, auth authInfo, certPool *x509.CertPool) *httpClient {
+func mkHttpClient(url string, timeout time.Duration, auth authInfo, certPool *x509.CertPool, clientCert *tls.Certificate) *httpClient {
+	tlsConfig := &tls.Config{RootCAs: certPool}
+	if clientCert != nil {
+		tlsConfig.Certificates = []tls.Certificate{*clientCert}
+	}
+
 	transport := &http.Transport{
-		TLSClientConfig: &tls.Config{RootCAs: certPool},
+		TLSClientConfig: tlsConfig,
 	}
 	return &httpClient{
 		http.Client{Timeout: timeout, Transport: transport},
@@ -60,6 +65,8 @@ func main() {
 	exportedTaskLabels := fs.String("exportedTaskLabels", "", "Comma-separated list of task labels to include in the task_labels metric")
 	ignoreCompletedFrameworkTasks := fs.Bool("ignoreCompletedFrameworkTasks", false, "Don't export task_state_time metric");
 	trustedCerts := fs.String("trustedCerts", "", "Comma-separated list of certificates (.pem files) trusted for requests to Mesos endpoints")
+	clientCert := fs.String("clientCert", "", "client certificate public key to use for connecting to Mesos")
+	clientKey := fs.String("clientKey", "", "client certificate private key to use for connecting to Mesos")
 
 	fs.Parse(os.Args[1:])
 	if *masterURL != "" && *slaveURL != "" {
@@ -76,6 +83,16 @@ func main() {
 		certPool = getX509CertPool(strings.Split(*trustedCerts, ","))
 	}
 
+	var tlsClientCert *tls.Certificate
+	if *clientCert != "" && *clientKey != "" {
+		cert, err := tls.LoadX509KeyPair(*clientCert, *clientKey)
+		if err != nil {
+			log.Fatalln("Failed to load client SSL certificate:", err)
+		}
+		tlsClientCert = &cert
+		log.Println("Using SSL client certificates from:", *clientCert, *clientKey)
+	}
+
 	switch {
 	case *masterURL != "":
 		for _, f := range []func(*httpClient) prometheus.Collector{
@@ -84,7 +101,7 @@ func main() {
 				return newMasterStateCollector(c, *ignoreCompletedFrameworkTasks)
 			},
 		} {
-			c := f(mkHttpClient(*masterURL, *timeout, auth, certPool));
+			c := f(mkHttpClient(*masterURL, *timeout, auth, certPool, tlsClientCert));
 			if err := prometheus.Register(c); err != nil {
 				log.Fatal(err)
 			}
@@ -108,7 +125,7 @@ func main() {
 		}
 
 		for _, f := range slaveCollectors {
-			c := f(mkHttpClient(*slaveURL, *timeout, auth, certPool));
+			c := f(mkHttpClient(*slaveURL, *timeout, auth, certPool, tlsClientCert));
 			if err := prometheus.Register(c); err != nil {
 				log.Fatal(err)
 			}
